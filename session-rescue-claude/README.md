@@ -1,0 +1,185 @@
+# Session Rescue for Claude
+
+Restore, browse, and manage archived Claude Desktop sessions. Works with both **Claude Code** and **Cowork** session stores.
+
+Developed by [Glen E. Grant](https://profile.glenegrant.com). See [VERIFICATION.md](VERIFICATION.md) for exactly what was tested and how, not just what's claimed.
+
+![Session Rescue for Claude](assets/og-card.png)
+
+> [!TIP]
+> **If this brings back a session you thought was gone, leave a star.** It costs one click and it is the only signal that tells me to keep maintaining it: [star this repo](https://github.com/Glenskii/session-rescue-for-claude/stargazers).
+
+## The problem
+
+Claude Desktop lets you archive a session with one click, but there is no UI to see your archived sessions or bring them back. One misclick and your project session vanishes from the sidebar with no recovery path. This tool fixes that. Jump straight to the [recovery workflow](#recovery-workflow) if you need a session back right now.
+
+## Important: quit means fully quit
+
+Claude Desktop caches session state (including the archived flag) in its IndexedDB and only writes that cache through to the session JSON files when the process actually terminates. Closing the window or using tray-icon Quit does not reliably do this. **Use Task Manager (or `kill`/`pkill` on macOS and Linux) to fully end the process**, then relaunch. Tested and confirmed: a real process kill followed by a relaunch correctly syncs archive and restore actions taken in the app, no extra tooling needed.
+
+If a session is still stuck archived after a full kill and relaunch (this happens to sessions that got desynced under an older build), that is what this tool and `rebuild_session_state.ps1` are for. See the Restore procedure below.
+
+## What it does
+
+- Finds every session across both stores: `claude-code-sessions` (Claude Code) and `local-agent-mode-sessions` (Cowork)
+- Restores archived sessions, individually or in bulk
+- Archives active sessions in bulk (the app only does one at a time)
+- Search by title or project folder, filter by store or status, group by project
+- Detects orphans: transcript folders missing their JSON, and vice versa
+- Headless CLI modes for scripting
+
+## Recovery workflow
+
+Start to finish, for the person who just realized a session is gone.
+
+**1. Confirm it is actually archived, not deleted.**
+```
+python claude_session_rescue.py --list
+```
+If the title shows up tagged `[ARCHIVED]`, it is recoverable. Nothing in normal use ever hard-deletes a session, only this tool's Trash action does, and even that moves it to a recoverable folder rather than removing it.
+
+**2. Try the simple fix first.**
+Fully kill Claude Desktop (Task Manager > End Task, or `kill`/`pkill`, never just the window close or tray Quit) and relaunch. If you archived or restored the session through the app's own sidebar, this alone fixes it. Check the sidebar before doing anything else.
+
+**3. Still missing? Open the tool and restore it.**
+```
+python claude_session_rescue.py
+```
+Filter to **Archived**, find the session, click **Restore** (or **Restore All Archived** for a bulk cleanup). This flips the flag on disk with an automatic backup taken first.
+
+**4. Fully kill and relaunch again.**
+The restore only takes effect once the app re-reads the session files from a cold start. This is the step people skip, and the reason a restore can look like it "did not work."
+
+**5. Still stuck? Force a full cache rebuild.**
+This covers sessions that got desynced under an older Claude Desktop build, where the app's IndexedDB cache and the session JSON files disagree even after a full kill and relaunch.
+```
+powershell -ExecutionPolicy Bypass -File rebuild_session_state.ps1
+```
+Then relaunch once more. See the Restore procedure below for exactly what this script does and how to roll it back.
+
+**6. Verify.**
+```
+python claude_session_rescue.py --list
+```
+The session should now show active, with no `[ARCHIVED]` tag.
+
+## Safety first
+
+This tool never destroys data:
+
+- **Automatic backups.** Every write is preceded by a timestamped copy in a `session-rescue-backups` folder inside the session store.
+- **Hash-verified backups.** Every backup is SHA-256 checked against its source right after copying. A mismatch aborts the operation instead of silently proceeding with a bad backup. A `.sha256` sidecar is kept alongside each backup so it can be re-verified later, surfaced through the **Integrity Check** button.
+- **Trash, not delete.** Removing a session moves it to a `session-rescue-trash` folder. Recover it any time by moving it back.
+- **Atomic writes.** Files are written to a temp file and renamed into place. A crash mid-write cannot corrupt a session.
+- **Field preservation.** Only the `isArchived` flag is changed. Every other field round-trips untouched.
+
+## Requirements
+
+- Python 3.8 or newer
+- Nothing else. Standard library only, no pip installs.
+
+## Usage
+
+**GUI (recommended):**
+
+```
+python claude_session_rescue.py
+```
+
+Opens a local browser UI at `http://127.0.0.1:52850`. Local only, zero external network access. Close the tab and the server shuts itself down.
+
+**CLI:**
+
+```
+python claude_session_rescue.py --list                  # print all sessions
+python claude_session_rescue.py --restore-all-archived  # bulk restore, no GUI
+python claude_session_rescue.py --path "D:\custom\dir"  # custom session store
+```
+
+**Everyday use: just kill and relaunch.** Archive or restore a session from Claude Desktop's own UI, fully kill the process (Task Manager > End Task, not the tray Quit), then relaunch. That is all it takes for normal use.
+
+**Stuck sessions (Windows, the reliable fallback):**
+
+1. Fully kill Claude Desktop via Task Manager
+2. Run:
+   ```
+   powershell -ExecutionPolicy Bypass -File rebuild_session_state.ps1
+   ```
+3. Relaunch Claude Desktop. Restored sessions appear in the sidebar.
+
+The script refuses to run while the app is open, restores every archived session in the JSON files, and renames the IndexedDB cache folders with a timestamped `.bak` suffix so the app rebuilds from the JSONs. If anything looks wrong afterward, quit the app, delete the fresh IndexedDB folders, and strip the `.bak` suffix to roll back exactly.
+
+On macOS and Linux the same principle applies: kill the app process, run `python3 claude_session_rescue.py --restore-all-archived`, then move the `IndexedDB/https_claude.ai_0.indexeddb.leveldb` and `.blob` folders aside before relaunching.
+
+## How it works
+
+Claude Desktop stores each session as a `local_<uuid>.json` file with a sibling transcript folder:
+
+| Store | Windows location |
+|-------|-----------------|
+| Claude Code | `%APPDATA%\Claude\claude-code-sessions\` |
+| Cowork | `%APPDATA%\Claude\local-agent-mode-sessions\` |
+
+macOS: `~/Library/Application Support/Claude/...` and Linux: `~/.config/Claude/...` use the same folder names.
+
+Archiving a session sets `"isArchived": true` in its JSON, and the app mirrors that state into its IndexedDB cache (`IndexedDB/https_claude.ai_0.indexeddb.*` under the Claude data folder). At startup the app trusts the cache, so a restore must flip the JSON and force a cache rebuild. Local sessions do not sync to claude.ai: the state is entirely on your machine.
+
+## Screenshots
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+**Archived filter view**
+Sessions found across both stores, ready to restore or trash.
+
+<img src="assets/screenshots/archived-filter-view.jpg" width="100%">
+
+</td>
+<td width="50%" valign="top">
+
+**In-app help panel**
+Opened from the `?` button, with the real fix and safety model.
+
+<img src="assets/screenshots/help-modal.jpg" width="100%">
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+**Restore confirmation banner**
+The full-kill fix, front and center, right after a restore.
+
+<img src="assets/screenshots/restart-banner.jpg" width="100%">
+
+</td>
+<td width="50%" valign="top">
+
+**Active sessions, Code and Cowork together**
+Everything unarchived, side by side, filterable by store.
+
+<img src="assets/screenshots/active-sessions-view.jpg" width="100%">
+
+</td>
+</tr>
+</table>
+
+## Claude Code skill
+
+The `skills/session-rescue/` folder contains a skill for Claude Code users. Drop it into your skills directory and Claude can list, restore, and manage sessions conversationally, following the same safety rules (backup before write, trash instead of delete, atomic writes).
+
+## Contributors
+
+1. **[Glen E. Grant](https://profile.glenegrant.com)** ([@Glenskii](https://github.com/Glenskii)) - creator and maintainer
+2. **[SugaCrypto](https://github.com/SugaCrypto)** - original author of [cowork-archive-manager](https://github.com/SugaCrypto/cowork-archive-manager), the source of the `isArchived` flag-flip mechanism this project builds on and extends to Claude Code sessions
+
+Contributions welcome. Open an issue or PR.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+## Disclaimer
+
+This tool modifies files inside Claude Desktop's data directory. It is not affiliated with or endorsed by Anthropic. The safety layer makes operations recoverable, but back up anything you cannot afford to lose. If Anthropic ships a native archived-sessions UI, use that instead and retire this happily.
