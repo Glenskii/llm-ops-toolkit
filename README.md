@@ -18,6 +18,10 @@ The source repositories remain public for compatibility with existing links, rel
 
 Each included tool retains its own documentation and license information. Start with the README in the folder that matches the tool you intend to use.
 
+## License
+
+MIT. See [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md). Included projects retain their own license files and notices.
+
 ## Scope
 
 This repository is a consolidation point. It does not replace a platform's native safety controls, backups, account access, or project-level review.
